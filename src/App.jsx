@@ -1,5 +1,5 @@
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Tesseract from 'tesseract.js';
 import * as XLSX from 'xlsx';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
@@ -7,6 +7,8 @@ import pdfjsWorker from 'pdfjs-dist/build/pdf.worker?url';
 import './App.css';
 // Set pdfjs-dist worker
 GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+
 
 function App() {
   const [ocrText, setOcrText] = useState('');
@@ -16,6 +18,39 @@ function App() {
   const fileInput = useRef();
 
   const [extractionMethod, setExtractionMethod] = useState('');
+  const resultRef = useRef();
+  const topScrollRef = useRef(null);
+  const contentScrollRef = useRef(null);
+  // State for table extraction (must be above useEffect)
+  const [extractedTables, setExtractedTables] = useState([]);
+  const [isTable, setIsTable] = useState(false);
+
+  // Synchronize top and bottom scroll bars
+  useEffect(() => {
+    const top = topScrollRef.current;
+    const content = contentScrollRef.current;
+    if (!top || !content) return;
+    const handleTopScroll = () => {
+      content.scrollLeft = top.scrollLeft;
+    };
+    const handleContentScroll = () => {
+      top.scrollLeft = content.scrollLeft;
+    };
+    top.addEventListener('scroll', handleTopScroll);
+    content.addEventListener('scroll', handleContentScroll);
+    return () => {
+      top.removeEventListener('scroll', handleTopScroll);
+      content.removeEventListener('scroll', handleContentScroll);
+    };
+  }, [ocrText, extractedTables, isTable]);
+
+  useEffect(() => {
+    if (ocrText && !processing && resultRef.current) {
+      resultRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    // eslint-disable-next-line
+  }, [ocrText, processing]);
+
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -137,9 +172,6 @@ function App() {
     return text;
   };
 
-  // State for table extraction
-  const [extractedTables, setExtractedTables] = useState([]);
-  const [isTable, setIsTable] = useState(false);
 
   const handleExport = () => {
     const wb = XLSX.utils.book_new();
@@ -156,8 +188,8 @@ function App() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', width: '100vw', background: '#f4f6fa', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-      <div style={{ width: '100%', maxWidth: 1200, display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '2rem' }}>
+    <div style={{ minHeight: '100vh', width: '100%', background: '#f4f6fa', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+      <div style={{ width: '100%', maxWidth: 600, display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '2rem' }}>
         <h1>Document OCR to Excel</h1>
         <input
           type="file"
@@ -175,8 +207,27 @@ function App() {
         )}
       </div>
       {ocrText && !processing && (
-        <div style={{ width: '100%', display: 'flex', justifyContent: 'center', margin: '2rem 0' }}>
-          <div style={{ width: '95vw', maxWidth: 1200, background: '#fff', borderRadius: 18, boxShadow: '0 4px 24px rgba(0,0,0,0.10)', padding: '2.5rem 2rem', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <div style={{ width: '100%', display: 'flex', justifyContent: 'center', margin: '2rem 0' }} ref={resultRef}>
+          <div style={{ width: '100%', maxWidth: 1200, background: '#fff', borderRadius: 18, boxShadow: '0 4px 24px rgba(0,0,0,0.10)', padding: '2.5rem 2rem', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            {/* Top scroll bar */}
+            <div
+              ref={topScrollRef}
+              style={{
+                width: '100%',
+                overflowX: 'auto',
+                overflowY: 'hidden',
+                height: 16,
+                marginBottom: 0,
+                position: 'relative',
+                background: 'transparent',
+                pointerEvents: 'auto',
+              }}
+            >
+              {/* Fake content to create scroll bar */}
+              <div style={{ width: isTable && extractedTables.length > 0
+                ? Math.max(900, ...extractedTables.map(table => (table[0]?.length || 1) * 180))
+                : 900, height: 1 }} />
+            </div>
             <h2 style={{marginTop:0, fontWeight:600, fontSize:'2rem', color:'#222'}}>Result</h2>
             {extractionMethod && (
               <p style={{margin:'0 0 1.5rem 0', color:'#666'}}><strong>Extraction Method:</strong> {extractionMethod}</p>
@@ -184,23 +235,28 @@ function App() {
             <button onClick={handleExport} style={{marginBottom:'2rem',padding:'0.75rem 2rem',fontSize:'1.1rem',fontWeight:600,background:'#2563eb',color:'#fff',border:'none',borderRadius:8,boxShadow:'0 2px 8px rgba(37,99,235,0.08)',cursor:'pointer',transition:'background 0.2s'}} onMouseOver={e=>e.target.style.background='#1741a6'} onMouseOut={e=>e.target.style.background='#2563eb'}>
               Export to Excel
             </button>
-            {isTable && extractedTables.length > 0 ? (
-              <div style={{overflowX:'auto', width:'100%'}}>
-                {extractedTables.map((table, idx) => (
-                  <table key={idx} style={{marginBottom:'2rem',width:'100%',borderCollapse:'collapse',background:'#fafbfc',borderRadius:10,overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-                    <tbody>
-                      {table.map((row, rIdx) => (
-                        <tr key={rIdx}>
-                          {row.map((cell, cIdx) => <td key={cIdx} style={{whiteSpace:'pre-wrap',padding:'0.5rem 1rem',border:'1px solid #e0e3ea',fontSize:'1rem',color:'#222'}}>{cell}</td>)}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ))}
-              </div>
-            ) : (
-              <textarea value={ocrText} readOnly rows={12} style={{ width: '100%', minHeight: 200, borderRadius: 10, border: '1px solid #e0e3ea', padding: '1rem', fontSize: '1.1rem', background:'#fafbfc', color:'#222', boxShadow:'0 1px 4px rgba(0,0,0,0.04)', resize:'vertical' }} />
-            )}
+            <div
+              ref={contentScrollRef}
+              style={{ width: '100%', overflowX: 'auto', overflowY: 'visible' }}
+            >
+              {isTable && extractedTables.length > 0 ? (
+                <div style={{width:'100%', maxWidth: '100%' }}>
+                  {extractedTables.map((table, idx) => (
+                    <table key={idx} style={{marginBottom:'2rem',width:'100%',borderCollapse:'collapse',background:'#fafbfc',borderRadius:10,overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+                      <tbody>
+                        {table.map((row, rIdx) => (
+                          <tr key={rIdx}>
+                            {row.map((cell, cIdx) => <td key={cIdx} style={{whiteSpace:'pre-wrap',padding:'0.5rem 1rem',border:'1px solid #e0e3ea',fontSize:'1rem',color:'#222'}}>{cell}</td>)}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ))}
+                </div>
+              ) : (
+                <textarea value={ocrText} readOnly rows={12} style={{ width: '100%', minHeight: 200, borderRadius: 10, border: '1px solid #e0e3ea', padding: '1rem', fontSize: '1.1rem', background:'#fafbfc', color:'#222', boxShadow:'0 1px 4px rgba(0,0,0,0.04)', resize:'vertical' }} />
+              )}
+            </div>
           </div>
         </div>
       )}
