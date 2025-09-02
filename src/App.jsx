@@ -15,6 +15,7 @@ function App() {
   const [fileName, setFileName] = useState('');
   const fileInput = useRef();
 
+  const [extractionMethod, setExtractionMethod] = useState('');
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -22,17 +23,21 @@ function App() {
     setOcrText('');
     setProgress(0);
     setProcessing(true);
-    let text = '';
+    setExtractionMethod('');
+    let method = '';
     if (file.type === 'application/pdf') {
-      text = await handlePdf(file);
+      const { usedOcr } = await handlePdf(file, true);
+      method = usedOcr ? 'OCR' : 'Text Extraction';
     } else if (file.type === 'text/html' || file.name.endsWith('.html')) {
-      text = await handleHtml(file);
+      await handleHtml(file);
+      method = 'Text Extraction';
     } else {
       setOcrText('Unsupported file type.');
       setProcessing(false);
+      setExtractionMethod('');
       return;
     }
-    setOcrText(text);
+    setExtractionMethod(method);
     setProcessing(false);
   };
 
@@ -62,37 +67,53 @@ function App() {
     }
   };
 
-  const handlePdf = async (file) => {
+  // handlePdf now sets extracted data directly and returns { usedOcr }
+  const handlePdf = async (file, setDataDirectly = false) => {
     try {
-      // Read PDF as ArrayBuffer
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await getDocument({ data: arrayBuffer }).promise;
       let allRows = [];
+      let usedOcr = false;
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const content = await page.getTextContent();
-        // Group items by y position (line), then sort by x (column)
-        const lines = {};
-        content.items.forEach(item => {
-          const y = Math.round(item.transform[5]);
-          if (!lines[y]) lines[y] = [];
-          lines[y].push(item);
-        });
-        const sortedLines = Object.values(lines)
-          .sort((a, b) => b[0].transform[5] - a[0].transform[5]) // top to bottom
-          .map(line => line.sort((a, b) => a.transform[4] - b.transform[4])) // left to right
-          .map(line => line.map(item => item.str));
-        allRows = allRows.concat(sortedLines);
+        if (content.items && content.items.length > 0 && content.items.some(item => item.str && item.str.trim() !== '')) {
+          const lines = {};
+          content.items.forEach(item => {
+            const y = Math.round(item.transform[5]);
+            if (!lines[y]) lines[y] = [];
+            lines[y].push(item);
+          });
+          const sortedLines = Object.values(lines)
+            .sort((a, b) => b[0].transform[5] - a[0].transform[5])
+            .map(line => line.sort((a, b) => a.transform[4] - b.transform[4]))
+            .map(line => line.map(item => item.str));
+          allRows = allRows.concat(sortedLines);
+        } else {
+          usedOcr = true;
+          const viewport = page.getViewport({ scale: 2 });
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const context = canvas.getContext('2d');
+          await page.render({ canvasContext: context, viewport }).promise;
+          const dataUrl = canvas.toDataURL('image/png');
+          const ocrText = await runOcrOnImage(dataUrl, i, pdf.numPages);
+          const ocrRows = ocrText.split('\n').map(line => [line]);
+          allRows = allRows.concat(ocrRows);
+        }
         setProgress(Math.round((i / pdf.numPages) * 100));
       }
       setExtractedTables([allRows]);
       setIsTable(true);
-      return 'Table-like structure extracted from PDF.';
+      // Set ocrText for textarea fallback if no table
+      setOcrText(allRows.map(row => row.join(' ')).join('\n'));
+      return { usedOcr };
     } catch (err) {
       setOcrText('PDF parsing error: ' + err.message);
       setProcessing(false);
       setIsTable(false);
-      return '';
+      return { usedOcr: false };
     }
   };
 
@@ -135,43 +156,52 @@ function App() {
   };
 
   return (
-    <div className="container">
-      <h1>Document OCR to Excel</h1>
-      <input
-        type="file"
-        accept=".pdf,.html,application/pdf,text/html"
-        ref={fileInput}
-        onChange={handleFileChange}
-        disabled={processing}
-      />
-      {fileName && <p>Selected file: {fileName}</p>}
-      {processing && (
-        <div>
-          <p>Processing... {progress}%</p>
-          <progress value={progress} max="100" />
-        </div>
-      )}
+    <div style={{ minHeight: '100vh', width: '100vw', background: '#f4f6fa', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+      <div style={{ width: '100%', maxWidth: 1200, display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '2rem' }}>
+        <h1>Document OCR to Excel</h1>
+        <input
+          type="file"
+          accept=".pdf,.html,application/pdf,text/html"
+          ref={fileInput}
+          onChange={handleFileChange}
+          disabled={processing}
+        />
+        {fileName && <p>Selected file: {fileName}</p>}
+        {processing && (
+          <div>
+            <p>Processing... {progress}%</p>
+            <progress value={progress} max="100" />
+          </div>
+        )}
+      </div>
       {ocrText && !processing && (
-        <div>
-          <h2>Result</h2>
-          {isTable && extractedTables.length > 0 ? (
-            <div style={{overflowX:'auto'}}>
-              {extractedTables.map((table, idx) => (
-                <table key={idx} border="1" cellPadding="4" style={{marginBottom:'1rem',width:'100%'}}>
-                  <tbody>
-                    {table.map((row, rIdx) => (
-                      <tr key={rIdx}>
-                        {row.map((cell, cIdx) => <td key={cIdx}>{cell}</td>)}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ))}
-            </div>
-          ) : (
-            <textarea value={ocrText} readOnly rows={10} style={{ width: '100%' }} />
-          )}
-          <button onClick={handleExport}>Export to Excel</button>
+        <div style={{ width: '100%', display: 'flex', justifyContent: 'center', margin: '2rem 0' }}>
+          <div style={{ width: '95vw', maxWidth: 1200, background: '#fff', borderRadius: 18, boxShadow: '0 4px 24px rgba(0,0,0,0.10)', padding: '2.5rem 2rem', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <h2 style={{marginTop:0, fontWeight:600, fontSize:'2rem', color:'#222'}}>Result</h2>
+            {extractionMethod && (
+              <p style={{margin:'0 0 1.5rem 0', color:'#666'}}><strong>Extraction Method:</strong> {extractionMethod}</p>
+            )}
+            <button onClick={handleExport} style={{marginBottom:'2rem',padding:'0.75rem 2rem',fontSize:'1.1rem',fontWeight:600,background:'#2563eb',color:'#fff',border:'none',borderRadius:8,boxShadow:'0 2px 8px rgba(37,99,235,0.08)',cursor:'pointer',transition:'background 0.2s'}} onMouseOver={e=>e.target.style.background='#1741a6'} onMouseOut={e=>e.target.style.background='#2563eb'}>
+              Export to Excel
+            </button>
+            {isTable && extractedTables.length > 0 ? (
+              <div style={{overflowX:'auto', width:'100%'}}>
+                {extractedTables.map((table, idx) => (
+                  <table key={idx} style={{marginBottom:'2rem',width:'100%',borderCollapse:'collapse',background:'#fafbfc',borderRadius:10,overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+                    <tbody>
+                      {table.map((row, rIdx) => (
+                        <tr key={rIdx}>
+                          {row.map((cell, cIdx) => <td key={cIdx} style={{whiteSpace:'pre-wrap',padding:'0.5rem 1rem',border:'1px solid #e0e3ea',fontSize:'1rem',color:'#222'}}>{cell}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ))}
+              </div>
+            ) : (
+              <textarea value={ocrText} readOnly rows={12} style={{ width: '100%', minHeight: 200, borderRadius: 10, border: '1px solid #e0e3ea', padding: '1rem', fontSize: '1.1rem', background:'#fafbfc', color:'#222', boxShadow:'0 1px 4px rgba(0,0,0,0.04)', resize:'vertical' }} />
+            )}
+          </div>
         </div>
       )}
     </div>
